@@ -4,6 +4,7 @@ resolver = "2"
 members = [
     "shared",
     "systemd",
+    "server",
 ]
 
 default-members = [

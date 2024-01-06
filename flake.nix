@@ -2,7 +2,7 @@
   description = "Secure Boot for NixOS";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable-small";
+    nixpkgs.url = "github:RaitoBezarius/nixpkgs/initrd-secrets";
 
     flake-parts.url = "github:hercules-ci/flake-parts";
     flake-parts.inputs.nixpkgs-lib.follows = "nixpkgs";
@@ -70,6 +70,17 @@
         }
       );
 
+      flake.nixosModules.lanzasignd = moduleWithSystem (
+        perSystem@{ config }:
+        { ... }: {
+          imports = [
+            ./nix/modules/lanzasignd.nix
+          ];
+
+          services.lanzasignd.package = perSystem.config.packages.lanzasignd;
+        }
+      );
+
       flake.nixosModules.uki = moduleWithSystem (
         perSystem@{ config }:
         { lib, ... }: {
@@ -109,6 +120,8 @@
             , src
             , target ? null
             , doCheck ? true
+              # By default, it builds the default members of the workspace.
+            , packages ? null
             , extraArgs ? { }
             }:
             let
@@ -136,7 +149,9 @@
                   #[cfg_attr(any(target_os = "none", target_os = "uefi"), export_name = "efi_main")]
                   fn main() {}
                 '';
-              } // extraArgs;
+
+                cargoExtraArgs = (extraArgs.cargoExtraArgs or "") + (if packages != null then (lib.concatStringsSep " " (map (p: "--package ${p}") packages)) else "");
+              } // builtins.removeAttrs extraArgs [ "cargoExtraArgs" ];
 
               cargoArtifacts = craneLib.buildDepsOnly commonArgs;
             in
@@ -167,6 +182,14 @@
             };
           };
 
+          lanzasigndCrane = buildRustApp {
+            pname = "lanzasignd";
+            src = craneLib.cleanCargoSource ./rust/tool;
+            doCheck = false;
+            packages = [ "lanzasignd" ];
+          };
+
+          lanzasignd = lanzasigndCrane.package;
           stub = stubCrane.package;
           fatStub = fatStubCrane.package;
 
@@ -201,18 +224,22 @@
         in
         {
           packages = {
-            inherit stub fatStub;
+            inherit stub fatStub lanzasignd;
             tool = wrappedTool;
             lzbt = wrappedTool;
           };
 
           overlayAttrs = {
-            inherit (config.packages) tool;
+            inherit (config.packages) tool lanzasignd;
           };
 
           checks =
             let
               nixosLib = import (pkgs.path + "/nixos/lib") { };
+              lanzaLib = import ./nix/tests/lib.nix {
+                inherit pkgs;
+                lanzabooteModule = self.nixosModules.lanzaboote;
+              };
               runTest = module: nixosLib.runTest {
                 imports = [ module ];
                 hostPkgs = pkgs;
@@ -225,11 +252,14 @@
               toolFmt = toolCrane.rustfmt;
               stubFmt = stubCrane.rustfmt;
             } // (import ./nix/tests/lanzaboote.nix {
-              inherit pkgs;
+              inherit pkgs lanzaLib;
               lanzabooteModule = self.nixosModules.lanzaboote;
             }) // (import ./nix/tests/stub.nix {
               inherit pkgs runTest;
               ukiModule = self.nixosModules.uki;
+            }) // (import ./nix/tests/remote-signing.nix {
+              inherit pkgs lanzaLib;
+              lanzasigndModule = self.nixosModules.lanzasignd;
             });
 
           pre-commit = {
@@ -251,6 +281,40 @@
               pkgs.statix
               pkgs.cargo-release
               pkgs.cargo-machete
+
+              # This is a special script to print out all the offsets
+              # related to OVMF debug binaries.
+              # To use it, you should obtain a debug log (serial console or the 0x402 port)
+              # It contains various offsets necessary to relocate all the offsets.
+              # Then, you need a OVMF tree, you can bring yours or put it in the Nix one.
+              # Once you are done, you can pipe the result of that script in /tmp/gdb-script or something like that.
+              # You can source it with gdb, then you should use `set substitute-paths /build/edk2... /nix/store/...edk2/...`
+              # to rewire the EDK2 source tree to the Nix store.
+              # Usage: `print-debug-script-for-ovmf $location_of_ovmf_debug_output $location_of_edk2_debug_outputs_in_nix_store > /tmp/gdbscript`
+              (pkgs.writeScriptBin "print-debug-script-for-ovmf"
+                (
+                  let
+                    pePythonEnv = pkgs.python3.withPackages (ps: with ps; [ pefile ]);
+                  in
+                  ''
+                    #!${pkgs.stdenv.shell}
+                    LOG=''${1:-build/debug.log}
+                    BUILD=''${2}
+                    SEARCHPATHS="''${BUILD}"
+
+                    cat ''${LOG} | grep Loading | grep -i efi | while read LINE; do
+                      BASE="`echo ''${LINE} | cut -d " " -f4`"
+                      NAME="`echo ''${LINE} | cut -d " " -f6 | tr -d "[:cntrl:]"`"
+                      EFIFILE="`find ''${SEARCHPATHS} -name ''${NAME} -maxdepth 1 -type f`"
+                      ADDR="`${pePythonEnv}/bin/python3 contrib/extract_text_va.py ''${EFIFILE} 2>/dev/null`"
+                      [ ! -z "$ADDR" ] && TEXT="`${pkgs.python3}/bin/python -c "print(hex(''${BASE} + ''${ADDR}))"`"
+                      SYMS="`echo ''${NAME} | sed -e "s/\.efi/\.debug/g"`"
+                      SYMFILE="`find ''${SEARCHPATHS} -name ''${SYMS} -maxdepth 1 -type f`"
+                      [ ! -z "$ADDR" ] && echo "add-symbol-file ''${SYMFILE} ''${TEXT}"
+                    done
+                  ''
+                )
+              )
 
               # Convenience for test fixtures in nix/tests.
               pkgs.openssl
