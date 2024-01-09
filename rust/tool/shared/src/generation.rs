@@ -39,6 +39,16 @@ pub struct Generation {
 }
 
 impl Generation {
+    pub fn from_toplevel(toplevel: &Path, version: u64) -> Result<Self> {
+        let link = GenerationLink {
+            version,
+            build_time: read_build_time(toplevel).ok(),
+            path: toplevel.to_path_buf()
+        };
+
+        Self::from_link(&link)
+    }
+
     pub fn from_link(link: &GenerationLink) -> Result<Self> {
         let bootspec_path = link.path.join("boot.json");
         let boot_json: BootJson = fs::read(bootspec_path)

@@ -74,3 +74,13 @@ pub fn file_hash(file: &Path) -> Result<Hash> {
         format!("Failed to read file to hash: {file:?}")
     })?))
 }
+
+pub fn assemble_kernel_cmdline(init: &Path, kernel_params: Vec<String>) -> Vec<String> {
+    let init_string = String::from(
+        init.to_str()
+            .expect("Failed to convert init path to string"),
+    );
+    let mut kernel_cmdline: Vec<String> = vec![format!("init={}", init_string)];
+    kernel_cmdline.extend(kernel_params);
+    kernel_cmdline
+}

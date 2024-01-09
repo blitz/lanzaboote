@@ -213,6 +213,7 @@
           checks =
             let
               nixosLib = import (pkgs.path + "/nixos/lib") { };
+              evalConfig = import (pkgs.path + "/nixos/lib/eval-config.nix");
               runTest = module: nixosLib.runTest {
                 imports = [ module ];
                 hostPkgs = pkgs;
@@ -225,7 +226,7 @@
               toolFmt = toolCrane.rustfmt;
               stubFmt = stubCrane.rustfmt;
             } // (import ./nix/tests/lanzaboote.nix {
-              inherit pkgs;
+              inherit pkgs evalConfig;
               lanzabooteModule = self.nixosModules.lanzaboote;
             }) // (import ./nix/tests/stub.nix {
               inherit pkgs runTest;

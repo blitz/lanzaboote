@@ -23,7 +23,7 @@ use lanzaboote_tool::generation::{Generation, GenerationLink};
 use lanzaboote_tool::os_release::OsRelease;
 use lanzaboote_tool::pe;
 use lanzaboote_tool::signature::KeyPair;
-use lanzaboote_tool::utils::{file_hash, SecureTempDirExt};
+use lanzaboote_tool::utils::{file_hash, SecureTempDirExt, assemble_kernel_cmdline};
 
 pub struct Installer {
     broken_gens: BTreeSet<u64>,
@@ -453,16 +453,6 @@ pub fn append_initrd_secrets(
     }
 
     Ok(())
-}
-
-fn assemble_kernel_cmdline(init: &Path, kernel_params: Vec<String>) -> Vec<String> {
-    let init_string = String::from(
-        init.to_str()
-            .expect("Failed to convert init path to string"),
-    );
-    let mut kernel_cmdline: Vec<String> = vec![format!("init={}", init_string)];
-    kernel_cmdline.extend(kernel_params);
-    kernel_cmdline
 }
 
 /// Atomically copy a file.
