@@ -18,3 +18,18 @@ sha2 = "0.10"
 # different versions.
 fastrand = "2.0.1"
 log = { version = "0.4", features = ["std"] }
+serde = { version = "1.0.194", features = ["derive"] }
+stderrlog = "0.5"
+indoc = "2"
+ureq = { version = "2.7.1", features = [ "json" ], optional = true }
+url = { version = "2.4.1", optional = true }
+
+[features]
+default = [ "remote_signature" ]
+remote_signature = [ "ureq", "url" ]
+
+[dev-dependencies]
+assert_cmd = "2.0.12"
+expect-test = "1.4.1"
+filetime = "0.2.21"
+rand = "0.8.5"

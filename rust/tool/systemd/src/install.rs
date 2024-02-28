@@ -4,7 +4,6 @@ use std::fs::{self, File};
 use std::os::fd::AsRawFd;
 use std::os::unix::prelude::{OsStrExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::string::ToString;
 
 use anyhow::{anyhow, Context, Result};
@@ -21,31 +20,31 @@ use lanzaboote_tool::esp::EspPaths;
 use lanzaboote_tool::gc::Roots;
 use lanzaboote_tool::generation::{Generation, GenerationLink};
 use lanzaboote_tool::os_release::OsRelease;
-use lanzaboote_tool::pe;
-use lanzaboote_tool::signature::KeyPair;
+use lanzaboote_tool::pe::{self, append_initrd_secrets};
+use lanzaboote_tool::signature::LanzabooteSigner;
 use lanzaboote_tool::utils::{file_hash, SecureTempDirExt};
 
-pub struct Installer {
+pub struct Installer<S: LanzabooteSigner> {
     broken_gens: BTreeSet<u64>,
     gc_roots: Roots,
     lanzaboote_stub: PathBuf,
     systemd: PathBuf,
     systemd_boot_loader_config: PathBuf,
-    key_pair: KeyPair,
+    signer: S,
     configuration_limit: usize,
     esp_paths: SystemdEspPaths,
     generation_links: Vec<PathBuf>,
     arch: Architecture,
 }
 
-impl Installer {
-    #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
+impl<S: LanzabooteSigner> Installer<S> {
     pub fn new(
         lanzaboote_stub: PathBuf,
         arch: Architecture,
         systemd: PathBuf,
         systemd_boot_loader_config: PathBuf,
-        key_pair: KeyPair,
+        signer: S,
         configuration_limit: usize,
         esp: PathBuf,
         generation_links: Vec<PathBuf>,
@@ -60,7 +59,7 @@ impl Installer {
             lanzaboote_stub,
             systemd,
             systemd_boot_loader_config,
-            key_pair,
+            signer,
             configuration_limit,
             esp_paths,
             generation_links,
@@ -211,17 +210,27 @@ impl Installer {
             .context("Failed to install the kernel.")?;
 
         // Assemble and install the initrd, and record its path on the ESP.
-        let initrd_location = tempdir
-            .write_secure_file(
-                fs::read(
-                    bootspec
-                        .initrd
-                        .as_ref()
-                        .context("Lanzaboote does not support missing initrd yet.")?,
+        // It is not needed to write the initrd in a temporary directory
+        // if we do not have any initrd secret.
+        let initrd_location = if bootspec.initrd_secrets.is_some() {
+            tempdir
+                .write_secure_file(
+                    fs::read(
+                        bootspec
+                            .initrd
+                            .as_ref()
+                            .context("Lanzaboote does not support missing initrd yet.")?,
+                    )
+                    .context("Failed to read the initrd.")?,
                 )
-                .context("Failed to read the initrd.")?,
-            )
-            .context("Failed to copy the initrd to the temporary directory.")?;
+                .context("Failed to copy the initrd to the temporary directory.")?
+        } else {
+            bootspec
+                .initrd
+                .clone()
+                .expect("Lanzaboote does not support missing initrd yet.")
+        };
+
         if let Some(initrd_secrets_script) = &bootspec.initrd_secrets {
             append_initrd_secrets(initrd_secrets_script, &initrd_location, generation.version)?;
         }
@@ -232,29 +241,45 @@ impl Installer {
         // Assemble, sign and install the Lanzaboote stub.
         let os_release = OsRelease::from_generation(generation)
             .context("Failed to build OsRelease from generation.")?;
-        let os_release_path = tempdir
-            .write_secure_file(os_release.to_string().as_bytes())
-            .context("Failed to write os-release file.")?;
+
+        let os_release_contents = os_release.to_string();
+
         let kernel_cmdline =
             assemble_kernel_cmdline(&bootspec.init, bootspec.kernel_params.clone());
-        let lanzaboote_image = pe::lanzaboote_image(
-            &tempdir,
+
+        let parameters = pe::StubParameters::new(
             &self.lanzaboote_stub,
-            &os_release_path,
-            &kernel_cmdline,
             &bootspec.kernel,
-            &kernel_target,
             &initrd_location,
+            &kernel_target,
             &initrd_target,
             &self.esp_paths.esp,
-        )
-        .context("Failed to assemble lanzaboote image.")?;
+        )?
+        .with_cmdline(&kernel_cmdline)
+        .with_os_release_contents(os_release_contents.as_bytes());
+
+        // TODO: how should we handle those cases?
+        if !self.signer.can_sign_stub(&parameters) {
+            log::warn!("Signer is not able to sign this stub, skipping...");
+            return Ok(());
+        }
+
+        let lanzaboote_image = self
+            .signer
+            .build_and_sign_stub(&parameters)
+            .context("Failed to build and sign lanzaboote stub image.")?;
+        let lanzaboote_image_path = tempdir
+            .write_secure_file(lanzaboote_image)
+            .context("Failed to write securely the signed lanzaboote stub image.")?;
+
         let stub_target = self
             .esp_paths
             .linux
-            .join(stub_name(generation, &self.key_pair.public_key)?);
+            .join(stub_name(generation, &self.signer)?);
+
         self.gc_roots.extend([&stub_target]);
-        install_signed(&self.key_pair, &lanzaboote_image, &stub_target)
+
+        install(&lanzaboote_image_path, &stub_target)
             .context("Failed to install the Lanzaboote stub.")?;
 
         Ok(())
@@ -267,7 +292,7 @@ impl Installer {
         let stub_target = self
             .esp_paths
             .linux
-            .join(stub_name(generation, &self.key_pair.public_key)?);
+            .join(stub_name(generation, &self.signer)?);
         let stub = fs::read(&stub_target)?;
         let kernel_path = resolve_efi_path(
             &self.esp_paths.esp,
@@ -327,13 +352,13 @@ impl Installer {
             if newer_systemd_boot_available {
                 log::info!("Updating {to:?}...")
             };
-            let systemd_boot_is_signed = &self.key_pair.verify(to);
+            let systemd_boot_is_signed = &self.signer.verify_path(to)?;
             if !systemd_boot_is_signed {
                 log::warn!("${to:?} is not signed. Replacing it with a signed binary...")
             };
 
             if newer_systemd_boot_available || !systemd_boot_is_signed {
-                install_signed(&self.key_pair, from, to)
+                install_signed(&self.signer, from, to)
                     .with_context(|| format!("Failed to install systemd-boot binary to: {to:?}"))?;
             }
         }
@@ -361,15 +386,16 @@ fn resolve_efi_path(esp: &Path, efi_path: &[u8]) -> Result<PathBuf> {
 /// Compute the file name to be used for the stub of a certain generation, signed with the given key.
 ///
 /// The generated name is input-addressed by the toplevel corresponding to the generation and the public part of the signing key.
-fn stub_name(generation: &Generation, public_key: &Path) -> Result<PathBuf> {
+fn stub_name<S: LanzabooteSigner>(generation: &Generation, signer: &S) -> Result<PathBuf> {
     let bootspec = &generation.spec.bootspec.bootspec;
+    let public_key = signer.get_public_key()?;
     let stub_inputs = [
         // Generation numbers can be reused if the latest generation was deleted.
         // To detect this, the stub path depends on the actual toplevel used.
         ("toplevel", bootspec.toplevel.0.as_os_str().as_bytes()),
         // If the key is rotated, the signed stubs must be re-generated.
         // So we make their path depend on the public key used for signature.
-        ("public_key", &fs::read(public_key)?),
+        ("public_key", &public_key),
     ];
     let stub_input_hash = Base32Unpadded::encode_string(&Sha256::digest(
         serde_json::to_string(&stub_inputs).unwrap(),
@@ -394,11 +420,11 @@ fn stub_name(generation: &Generation, public_key: &Path) -> Result<PathBuf> {
 /// This is implemented as an atomic write. The file is first written to the destination with a
 /// `.tmp` suffix and then renamed to its final name. This is atomic, because a rename is an atomic
 /// operation on POSIX platforms.
-fn install_signed(key_pair: &KeyPair, from: &Path, to: &Path) -> Result<()> {
+fn install_signed(signer: &impl LanzabooteSigner, from: &Path, to: &Path) -> Result<()> {
     log::debug!("Signing and installing {to:?}...");
     let to_tmp = to.with_extension(".tmp");
     ensure_parent_dir(&to_tmp);
-    key_pair
+    signer
         .sign_and_copy(from, &to_tmp)
         .with_context(|| format!("Failed to copy and sign file from {from:?} to {to:?}"))?;
     fs::rename(&to_tmp, to).with_context(|| {
@@ -432,26 +458,6 @@ fn force_install(from: &Path, to: &Path) -> Result<()> {
     atomic_copy(from, to)?;
     set_permission_bits(to, 0o755)
         .with_context(|| format!("Failed to set permission bits to 0o755 on file: {to:?}"))?;
-    Ok(())
-}
-
-pub fn append_initrd_secrets(
-    append_initrd_secrets_path: &Path,
-    initrd_path: &PathBuf,
-    generation_version: u64,
-) -> Result<()> {
-    let status = Command::new(append_initrd_secrets_path)
-        .args(vec![initrd_path])
-        .status()
-        .context("Failed to append initrd secrets")?;
-    if !status.success() {
-        return Err(anyhow::anyhow!(
-            "Failed to append initrd secrets for generation {} with args `{:?}`",
-            generation_version,
-            vec![append_initrd_secrets_path, initrd_path],
-        ));
-    }
-
     Ok(())
 }
 

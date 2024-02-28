@@ -1,0 +1,23 @@
+[package]
+name = "lanzaboote_signd"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.71"
+stderrlog = "0.5.4"
+log = { version = "0.4.18", features = ["std"] }
+clap = { version = "4.3.1", features = ["derive"] }
+lanzaboote_tool = { path = "../tool/shared" }
+indoc = "2.0.1"
+tempfile = "3.5.0"
+nix = { version = "0.26.2", default-features = false, features = [ "fs" ] }
+rouille = "3.6.2"
+serde = { version = "1.0.163", features = ["derive"] }
+serde_json = "1.0.107"
+thiserror = "1.0.49"
+
+[dev-dependencies]
+ureq = "2.9.1"

@@ -36,23 +36,33 @@ in
       '';
     };
 
+    localSigning = {
+      enable = mkEnableOption "local signing" // { default = cfg.pkiBundle != null; defaultText = lib.literalExpression "cfg.pkiBundle != null"; };
+      publicKeyFile = mkOption {
+        type = types.path;
+        default = "${cfg.pkiBundle}/keys/db/db.pem";
+        description = "Public key to sign your boot files";
+      };
+
+      privateKeyFile = mkOption {
+        type = types.path;
+        default = "${cfg.pkiBundle}/keys/db/db.key";
+        description = "Private key to sign your boot files";
+      };
+    };
+
+    remoteSigning = {
+      enable = mkEnableOption "remote signing";
+      serverUrl = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "Remote signing server to contact to ask for signatures";
+      };
+    };
+
     pkiBundle = mkOption {
       type = types.nullOr types.path;
       description = "PKI bundle containing db, PK, KEK";
-    };
-
-    publicKeyFile = mkOption {
-      type = types.path;
-      default = "${cfg.pkiBundle}/keys/db/db.pem";
-      defaultText = "\${cfg.pkiBundle}/keys/db/db.pem";
-      description = "Public key to sign your boot files";
-    };
-
-    privateKeyFile = mkOption {
-      type = types.path;
-      default = "${cfg.pkiBundle}/keys/db/db.key";
-      defaultText = "\${cfg.pkiBundle}/keys/db/db.key";
-      description = "Private key to sign your boot files";
     };
 
     package = mkOption {
@@ -103,31 +113,56 @@ in
   };
 
   config = mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = !(cfg.localSigning.enable && cfg.remoteSigning.enable);
+        message = ''
+          You cannot enable local and remote signing at the same time, pick either of the strategy.
+
+          Did you set `pkiBundle` and forgot to set `localSigning.enable` to false?
+        '';
+      }
+    ];
     boot.bootspec = {
       enable = true;
     };
     boot.loader.supportsInitrdSecrets = true;
     boot.loader.external = {
       enable = true;
-      installHook = pkgs.writeShellScript "bootinstall" ''
-        ${optionalString cfg.enrollKeys ''
-          mkdir -p /tmp/pki
-          cp -r ${cfg.pkiBundle}/* /tmp/pki
-          ${sbctlWithPki}/bin/sbctl enroll-keys --yes-this-might-brick-my-machine
-        ''}
+      installHook =
+        let
+          lzbtArgs = [
+            "install"
+            "--system"
+            config.boot.kernelPackages.stdenv.hostPlatform.system
+            "--systemd"
+            config.systemd.package
+            "--systemd-boot-loader-config"
+            loaderConfigFile
+          ] ++ lib.optionals cfg.localSigning.enable [
+            "--public-key"
+            cfg.localSigning.publicKeyFile
+            "--private-key"
+            cfg.localSigning.privateKeyFile
+          ] ++ lib.optionals cfg.remoteSigning.enable [
+            "--remote-signing-server-url"
+            cfg.remoteSigning.serverUrl
+          ] ++ [
+            "--configuration-limit"
+            (toString configurationLimit)
+            config.boot.loader.efi.efiSysMountPoint
+            "/nix/var/nix/profiles/system-*-link"
+          ];
+        in
+        pkgs.writeShellScript "bootinstall" ''
+          ${optionalString cfg.enrollKeys ''
+            mkdir -p /tmp/pki
+            cp -r ${cfg.pkiBundle}/* /tmp/pki
+            ${sbctlWithPki}/bin/sbctl enroll-keys --yes-this-might-brick-my-machine
+          ''}
 
-        # Use the system from the kernel's hostPlatform because this should
-        # always, even in the cross compilation case, be the right system.
-        ${cfg.package}/bin/lzbt install \
-          --system ${config.boot.kernelPackages.stdenv.hostPlatform.system} \
-          --systemd ${config.systemd.package} \
-          --systemd-boot-loader-config ${loaderConfigFile} \
-          --public-key ${cfg.publicKeyFile} \
-          --private-key ${cfg.privateKeyFile} \
-          --configuration-limit ${toString configurationLimit} \
-          ${config.boot.loader.efi.efiSysMountPoint} \
-          /nix/var/nix/profiles/system-*-link
-      '';
+          ${cfg.package}/bin/lzbt ${concatStringsSep " " lzbtArgs}
+        '';
     };
 
     systemd.services.fwupd = lib.mkIf config.services.fwupd.enable {

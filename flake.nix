@@ -57,6 +57,17 @@
         }
       );
 
+      flake.nixosModules.lanzasignd = moduleWithSystem (
+        perSystem@{ config }:
+        { ... }: {
+          imports = [
+            ./nix/modules/lanzasignd.nix
+          ];
+
+          services.lanzasignd.package = perSystem.config.packages.lanzasignd;
+        }
+      );
+
       flake.nixosModules.uki = moduleWithSystem (
         perSystem@{ config }:
         { lib, ... }: {
@@ -96,6 +107,8 @@
             , src
             , target ? null
             , doCheck ? true
+              # By default, it builds the default members of the workspace.
+            , packages ? null
             , extraArgs ? { }
             }:
             let
@@ -123,7 +136,9 @@
                   #[cfg_attr(any(target_os = "none", target_os = "uefi"), export_name = "efi_main")]
                   fn main() {}
                 '';
-              } // extraArgs;
+
+                cargoExtraArgs = (extraArgs.cargoExtraArgs or "") + (if packages != null then (lib.concatStringsSep " " (map (p: "--package ${p}") packages)) else "");
+              } // builtins.removeAttrs extraArgs [ "cargoExtraArgs" ];
 
               cargoArtifacts = craneLib.buildDepsOnly commonArgs;
             in
@@ -154,6 +169,14 @@
             };
           };
 
+          lanzasigndCrane = buildRustApp {
+            pname = "lanzasignd";
+            src = craneLib.cleanCargoSource ./rust/tool;
+            doCheck = false;
+            packages = [ "lanzasignd" ];
+          };
+
+          lanzasignd = lanzasigndCrane.package;
           stub = stubCrane.package;
           fatStub = fatStubCrane.package;
 
@@ -188,18 +211,22 @@
         in
         {
           packages = {
-            inherit stub fatStub;
+            inherit stub fatStub lanzasignd;
             tool = wrappedTool;
             lzbt = wrappedTool;
           };
 
           overlayAttrs = {
-            inherit (config.packages) tool;
+            inherit (config.packages) tool lanzasignd;
           };
 
           checks =
             let
               nixosLib = import (pkgs.path + "/nixos/lib") { };
+              lanzaLib = import ./nix/tests/lib.nix {
+                inherit pkgs;
+                lanzabooteModule = self.nixosModules.lanzaboote;
+              };
               runTest = module: nixosLib.runTest {
                 imports = [ module ];
                 hostPkgs = pkgs;
@@ -212,11 +239,14 @@
               toolFmt = toolCrane.rustfmt;
               stubFmt = stubCrane.rustfmt;
             } // (import ./nix/tests/lanzaboote.nix {
-              inherit pkgs;
+              inherit pkgs lanzaLib;
               lanzabooteModule = self.nixosModules.lanzaboote;
             }) // (import ./nix/tests/stub.nix {
               inherit pkgs runTest;
               ukiModule = self.nixosModules.uki;
+            }) // (import ./nix/tests/remote-signing.nix {
+              inherit pkgs lanzaLib;
+              lanzasigndModule = self.nixosModules.lanzasignd;
             });
 
           devShells.default = pkgs.mkShell {

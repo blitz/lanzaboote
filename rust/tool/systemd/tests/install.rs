@@ -52,6 +52,7 @@ fn do_not_overwrite_images() -> Result<()> {
     let output1 = common::lanzaboote_install(0, esp.path(), generation_links.clone())?;
     assert!(output1.status.success());
 
+    assert!(verify_signature(&image1)?);
     remove_signature(&image1)?;
     assert!(!verify_signature(&image1)?);
     assert!(verify_signature(&image2)?);
