@@ -1,8 +1,11 @@
+use alloc::ffi::CString;
+
 /// List of PE sections that have a special meaning with respect to
 /// UKI specification.
 /// This is the canonical order in which they are measured into TPM
 /// PCR 11.
 /// !!! DO NOT REORDER !!!
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum UnifiedSection {
     Linux = 0,
@@ -36,5 +39,27 @@ impl UnifiedSection {
     /// Whether this section should be measured into TPM.
     pub fn should_be_measured(&self) -> bool {
         !matches!(self, UnifiedSection::PcrSig)
+    }
+
+    /// The canonical section name.
+    pub fn name(&self) -> &'static str {
+        match self {
+            UnifiedSection::Linux => ".linux",
+            UnifiedSection::OsRel => ".osrel",
+            UnifiedSection::CmdLine => ".cmdline",
+            UnifiedSection::Initrd => ".initrd",
+            UnifiedSection::Splash => ".splash",
+            UnifiedSection::Dtb => ".dtb",
+            UnifiedSection::PcrSig => ".pcrsig",
+            UnifiedSection::PcrPkey => ".pcrpkey",
+        }
+    }
+
+    /// The section name as a `CString`.
+    pub fn name_cstr(&self) -> CString {
+        // This should never panic:
+        // CString::new() only returns an error on strings containing a null byte,
+        // and we only call it on strings we specified above
+        CString::new(self.name()).expect("section name should not contain a null byte")
     }
 }

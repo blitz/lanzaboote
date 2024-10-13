@@ -1,9 +1,10 @@
-use alloc::{string::ToString, vec::Vec};
+use alloc::{collections::BTreeMap, string::ToString};
 use log::info;
 use uefi::{
     cstr16,
     proto::tcg::PcrIndex,
     table::{runtime::VariableAttributes, Boot, SystemTable},
+    CString16,
 };
 
 use crate::{
@@ -37,35 +38,85 @@ pub fn measure_image(system_table: &SystemTable<Boot>, image: &PeInMemory) -> ue
     let pe = goblin::pe::PE::parse(pe_binary).map_err(|_err| uefi::Status::LOAD_ERROR)?;
 
     let mut measurements = 0;
-    for section in pe.sections {
-        let section_name = section.name().map_err(|_err| uefi::Status::UNSUPPORTED)?;
-        if let Ok(unified_section) = UnifiedSection::try_from(section_name) {
-            // UNSTABLE: && in the previous if is an unstable feature
-            // https://github.com/rust-lang/rust/issues/53667
-            if unified_section.should_be_measured() {
-                // Here, perform the TPM log event in ASCII.
-                if let Some(data) = pe_section_data(pe_binary, &section) {
-                    info!("Measuring section `{}`...", section_name);
-                    if tpm_log_event_ascii(
-                        boot_services,
-                        TPM_PCR_INDEX_KERNEL_IMAGE,
-                        data,
-                        section_name,
-                    )? {
-                        measurements += 1;
-                    }
-                }
-            }
+
+    // Match behaviour of systemd-stub (see src/boot/efi/stub.c in systemd)
+    // The encoding as well as the ordering of measurements is critical.
+    //
+    // References:
+    //
+    // "TPM2 PCR Measurements Made by systemd", https://systemd.io/TPM2_PCR_MEASUREMENTS/
+    //   Section: PCR Measurements Made by systemd-stub (UEFI)
+    //   - PCR 11, EV_IPL, “PE Section Name”
+    //   - PCR 11, EV_IPL, “PE Section Data”
+    //
+    // Unified Kernel Image (UKI) specification, UAPI Group,
+    // https://uapi-group.org/specifications/specs/unified_kernel_image/#uki-tpm-pcr-measurements
+    //
+    // Citing from "UKI TPM PCR Measurements":
+    //   On systems with a Trusted Platform Module (TPM) the UEFI boot stub shall measure the sections listed above,
+    //   starting from the .linux section, in the order as listed (which should be considered the canonical order).
+    //   The .pcrsig section is not measured.
+    //
+    //   For each section two measurements shall be made into PCR 11 with the event code EV_IPL:
+    //    - The section name in ASCII (including one trailing NUL byte)
+    //    - The (binary) section contents
+    //
+    //   The above should be repeated for every section defined above, so that the measurements are interleaved:
+    //   section name followed by section data, followed by the next section name and its section data, and so on.
+
+    // NOTE: The order of measurements is important, so the use of BTreeMap is intentional here.
+    let ordered_sections: BTreeMap<_, _> = pe
+        .sections
+        .iter()
+        .filter_map(|section| {
+            let section_name = section.name().ok()?;
+            let unified_section = UnifiedSection::try_from(section_name).ok()?;
+            unified_section
+                .should_be_measured()
+                .then_some((unified_section, section))
+        })
+        .collect();
+
+    for (unified_section, section) in ordered_sections {
+        let section_name = unified_section.name();
+
+        info!("Measuring section `{}`...", section_name);
+
+        // First measure the section name itself
+        // This needs to be an UTF-8 encoded string with a trailing null byte
+        //
+        // As per reference:
+        // "Measured hash covers the PE section name in ASCII (including a trailing NUL byte!)."
+        let section_name_cstr_utf8 = unified_section.name_cstr();
+
+        if tpm_log_event_ascii(
+            boot_services,
+            TPM_PCR_INDEX_KERNEL_IMAGE,
+            section_name_cstr_utf8.as_bytes_with_nul(),
+            section_name,
+        )? {
+            measurements += 1;
+        }
+
+        // Then measure the section contents.
+        let Some(data) = pe_section_data(pe_binary, section) else {
+            continue;
+        };
+
+        if tpm_log_event_ascii(
+            boot_services,
+            TPM_PCR_INDEX_KERNEL_IMAGE,
+            data,
+            section_name,
+        )? {
+            measurements += 1;
         }
     }
 
     if measurements > 0 {
-        let pcr_index_encoded = TPM_PCR_INDEX_KERNEL_IMAGE
-            .0
-            .to_string()
-            .encode_utf16()
-            .flat_map(|c| c.to_le_bytes())
-            .collect::<Vec<u8>>();
+        let pcr_index_encoded =
+            CString16::try_from(TPM_PCR_INDEX_KERNEL_IMAGE.0.to_string().as_str())
+                .map_err(|_err| uefi::Status::UNSUPPORTED)?;
 
         // If we did some measurements, expose a variable encoding the PCR where
         // we have done the measurements.
@@ -73,7 +124,7 @@ pub fn measure_image(system_table: &SystemTable<Boot>, image: &PeInMemory) -> ue
             cstr16!("StubPcrKernelImage"),
             &BOOT_LOADER_VENDOR_UUID,
             VariableAttributes::BOOTSERVICE_ACCESS | VariableAttributes::RUNTIME_ACCESS,
-            &pcr_index_encoded,
+            pcr_index_encoded.as_bytes(),
         )?;
     }
 
