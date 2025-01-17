@@ -115,7 +115,10 @@ pub fn lanzaboote_image(
         s(".initrdh", initrd_hash_file),
         s(".linuxh", kernel_hash_file),
     ];
-    calculate_offsets(stub_offset(&stub_parameters.lanzaboote_store_path)?, &mut sections)?;
+    calculate_offsets(
+        stub_offset(&stub_parameters.lanzaboote_store_path)?,
+        &mut sections,
+    )?;
 
     let image_path = tempdir.path().join(tmpname());
     wrap_in_pe(

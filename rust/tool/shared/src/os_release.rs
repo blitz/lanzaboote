@@ -50,10 +50,16 @@ impl OsRelease {
     }
 
     pub fn pretty_name(&self) -> &str {
-        self.0.get("PRETTY_NAME").map(|v| v.as_str()).unwrap_or_default()
+        self.0
+            .get("PRETTY_NAME")
+            .map(|v| v.as_str())
+            .unwrap_or_default()
     }
     pub fn version_id(&self) -> &str {
-        self.0.get("VERSION_ID").map(|v| v.as_str()).unwrap_or_default()
+        self.0
+            .get("VERSION_ID")
+            .map(|v| v.as_str())
+            .unwrap_or_default()
     }
 }
 
