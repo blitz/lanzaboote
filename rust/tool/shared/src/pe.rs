@@ -4,7 +4,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use goblin::pe::PE;
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
@@ -106,21 +106,16 @@ pub fn lanzaboote_image(
         tempdir.write_secure_file(file_hash(&stub_parameters.initrd_store_path)?.as_slice())?;
 
     let os_release = tempdir.write_secure_file(&stub_parameters.os_release_contents)?;
-    let os_release_offs = stub_offset(&stub_parameters.lanzaboote_store_path)?;
-    let kernel_cmdline_offs = os_release_offs + file_size(&os_release)?;
-    let initrd_path_offs = kernel_cmdline_offs + file_size(&kernel_cmdline_file)?;
-    let kernel_path_offs = initrd_path_offs + file_size(&initrd_path_file)?;
-    let initrd_hash_offs = kernel_path_offs + file_size(&kernel_path_file)?;
-    let kernel_hash_offs = initrd_hash_offs + file_size(&initrd_hash_file)?;
 
-    let sections = vec![
-        s(".osrel", os_release, os_release_offs),
-        s(".cmdline", kernel_cmdline_file, kernel_cmdline_offs),
-        s(".initrd", initrd_path_file, initrd_path_offs),
-        s(".linux", kernel_path_file, kernel_path_offs),
-        s(".initrdh", initrd_hash_file, initrd_hash_offs),
-        s(".linuxh", kernel_hash_file, kernel_hash_offs),
+    let mut sections = vec![
+        s(".osrel", os_release),
+        s(".cmdline", kernel_cmdline_file),
+        s(".initrd", initrd_path_file),
+        s(".linux", kernel_path_file),
+        s(".initrdh", initrd_hash_file),
+        s(".linuxh", kernel_hash_file),
     ];
+    calculate_offsets(stub_offset(&stub_parameters.lanzaboote_store_path)?, &mut sections)?;
 
     let image_path = tempdir.path().join(tmpname());
     wrap_in_pe(
@@ -128,6 +123,47 @@ pub fn lanzaboote_image(
         sections,
         &image_path,
     )?;
+    Ok(image_path)
+}
+
+// FIXME: This function generates huge images, as it copies kernel & initrd inside,
+// lanzaboote stub needs to be extended to support xen images.
+#[allow(clippy::too_many_arguments)]
+pub fn xen_image(
+    tempdir: &TempDir,
+    xen_stub: &Path,
+    xen_options: &[String],
+    kernel_cmdline: &[String],
+    kernel: &Path,
+    initrd: &Path,
+) -> Result<PathBuf> {
+    use std::fmt::Write;
+    let mut xen_config = String::new();
+    writeln!(xen_config, "[global]")?;
+    writeln!(xen_config, "default=xen")?;
+    writeln!(xen_config)?;
+    writeln!(xen_config, "[xen]")?;
+    writeln!(
+        xen_config,
+        "kernel=nope_this_is_uxi {}",
+        kernel_cmdline.join(" ")
+    )?;
+    writeln!(xen_config, "ramdisk=nope_this_is_uxi")?;
+    writeln!(xen_config, "options={}", xen_options.join(" "),)?;
+    let xen_config_file = tempdir.write_secure_file(xen_config)?;
+
+    ensure!(kernel.ends_with("vmlinux"), "kernel is not vmlinux image");
+
+    let mut sections = vec![
+        s(".config", xen_config_file),
+        s(".kernel", kernel),
+        s(".ramdisk", initrd),
+    ];
+
+    calculate_offsets(xen_offset(xen_stub)?, &mut sections)?;
+
+    let image_path = tempdir.path().join(tmpname());
+    wrap_in_pe(xen_stub, sections, &image_path)?;
     Ok(image_path)
 }
 
@@ -162,9 +198,13 @@ struct Section {
 }
 
 impl Section {
+    fn resolved_offset(&self) -> bool {
+        self.offset != u64::MAX
+    }
     /// Create objcopy `-add-section` command line parameters that
     /// attach the section to a PE file.
     fn to_objcopy(&self) -> Vec<OsString> {
+        assert!(self.resolved_offset(), "section offset is not resolved!");
         // There is unfortunately no format! for OsString, so we cannot
         // just format a path.
         let mut map_str: OsString = format!("{}=", self.name).into();
@@ -179,12 +219,25 @@ impl Section {
     }
 }
 
-fn s(name: &'static str, file_path: impl AsRef<Path>, offset: u64) -> Section {
+fn s(name: &'static str, file_path: impl AsRef<Path>) -> Section {
     Section {
         name,
         file_path: file_path.as_ref().into(),
-        offset,
+        offset: u64::MAX,
     }
+}
+// EFI sections needs to be 4k aligned
+fn align_to_4k(num: u64) -> u64 {
+    (num + 0xFFF) & !0xFFF
+}
+fn calculate_offsets(mut current: u64, sections: &mut [Section]) -> Result<()> {
+    for section in sections.iter_mut() {
+        current = align_to_4k(current);
+        assert!(!section.resolved_offset(), "section offset is known");
+        section.offset = current;
+        current += file_size(&section.file_path)?;
+    }
+    Ok(())
 }
 
 /// Convert a path to an UEFI path relative to the specified ESP.
@@ -221,6 +274,20 @@ fn stub_offset(binary: &Path) -> Result<u64> {
             .map(|s| s.virtual_size + s.virtual_address)
             .expect("Failed to calculate offset"),
     ) + image_base)
+}
+fn xen_offset(binary: &Path) -> Result<u64> {
+    let pe_binary = fs::read(binary).context("Failed to read PE binary file")?;
+    let pe = PE::parse(&pe_binary).context("Failed to parse PE binary file")?;
+
+    let image_base = image_base(&pe);
+
+    let pad_section = pe
+        .sections
+        .iter()
+        .find(|s| s.name().ok() == Some(".pad"))
+        .expect("failed to discover .pad section");
+    let offset = pad_section.virtual_size + pad_section.virtual_address;
+    Ok(u64::from(offset) + image_base)
 }
 
 fn image_base(pe: &PE) -> u64 {

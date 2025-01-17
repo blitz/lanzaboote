@@ -16,10 +16,11 @@ pub struct SystemdEspPaths {
     pub systemd: PathBuf,
     pub systemd_boot: PathBuf,
     pub loader: PathBuf,
+    pub entries: PathBuf,
     pub systemd_boot_loader_config: PathBuf,
 }
 
-impl EspPaths<10> for SystemdEspPaths {
+impl EspPaths<11> for SystemdEspPaths {
     fn new(esp: impl AsRef<Path>, architecture: Architecture) -> Self {
         let esp = esp.as_ref();
         let efi = esp.join("EFI");
@@ -28,6 +29,7 @@ impl EspPaths<10> for SystemdEspPaths {
         let efi_systemd = efi.join("systemd");
         let efi_efi_fallback_dir = efi.join("BOOT");
         let loader = esp.join("loader");
+        let entries = loader.join("entries");
         let systemd_boot_loader_config = loader.join("loader.conf");
 
         Self {
@@ -40,6 +42,7 @@ impl EspPaths<10> for SystemdEspPaths {
             systemd: efi_systemd.clone(),
             systemd_boot: efi_systemd.join(architecture.systemd_filename()),
             loader,
+            entries,
             systemd_boot_loader_config,
         }
     }
@@ -52,7 +55,7 @@ impl EspPaths<10> for SystemdEspPaths {
         &self.linux
     }
 
-    fn iter(&self) -> std::array::IntoIter<&PathBuf, 10> {
+    fn iter(&self) -> std::array::IntoIter<&PathBuf, 11> {
         [
             &self.esp,
             &self.efi,
@@ -63,6 +66,7 @@ impl EspPaths<10> for SystemdEspPaths {
             &self.systemd,
             &self.systemd_boot,
             &self.loader,
+            &self.entries,
             &self.systemd_boot_loader_config,
         ]
         .into_iter()

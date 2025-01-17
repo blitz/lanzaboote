@@ -269,6 +269,76 @@ impl<S: Signer> Installer<S> {
         install_signed(&self.signer, &lanzaboote_image_path, &stub_target)
             .context("Failed to install the Lanzaboote stub.")?;
 
+        if let Some(xen) = &generation.spec.xen_extension {
+            use std::fmt::Write;
+            let xen_image = pe::xen_image(
+                &tempdir,
+                &PathBuf::from(&xen.xen),
+                &xen.xen_params,
+                &kernel_cmdline,
+                &PathBuf::from(&xen.vmlinux),
+                &initrd_location,
+            )
+            .context("Failed to assemble xen image.")?;
+            let stub_target = self
+                .esp_paths
+                .linux
+                .join(stub_name(generation, &self.key_pair.public_key)?);
+            self.gc_roots.extend([&stub_target]);
+            install_signed(&self.key_pair, &xen_image, &stub_target)
+                .context("Failed to install the Lanzaboote image.")?;
+
+            // TODO: Currently xen doesn't work with specializations,
+            // and specialization name is not handled here, but this may
+            // be changed in the future.
+            let entry_path = self
+                .esp_paths
+                .entries
+                .join(format!("nixos-xen-{generation}.conf"));
+            self.gc_roots.extend([&entry_path]);
+
+            let mut entry = String::new();
+            writeln!(
+                entry,
+                "title {}",
+                os_release.0.get("PRETTY_NAME").expect("exists")
+            )?;
+            // stub_target should be utf-8, .display() is ok here.
+            // TODO: but better cleanup this. Use esp_relative_uefi_path
+            // for this calculation.
+            writeln!(
+                entry,
+                "efi {}",
+                stub_target.strip_prefix(&self.esp_paths.esp)?.display()
+            )?;
+
+            let entry_tmp = tempdir.write_secure_file(entry)?;
+
+            // Entry name is unique (with regards to comment about
+            // specialisations above).
+            install(&entry_tmp, &entry_path)?;
+        } else {
+            let lanzaboote_image = pe::lanzaboote_image(
+                &tempdir,
+                &self.lanzaboote_stub,
+                &os_release_path,
+                &kernel_cmdline,
+                &bootspec.kernel,
+                &kernel_target,
+                &initrd_location,
+                &initrd_target,
+                &self.esp_paths.esp,
+            )
+            .context("Failed to assemble lanzaboote image.")?;
+            let stub_target = self
+                .esp_paths
+                .linux
+                .join(stub_name(generation, &self.key_pair.public_key)?);
+            self.gc_roots.extend([&stub_target]);
+            install_signed(&self.key_pair, &lanzaboote_image, &stub_target)
+                .context("Failed to install the Lanzaboote stub.")?;
+        }
+
         Ok(())
     }
 
