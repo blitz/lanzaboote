@@ -286,29 +286,24 @@ impl<S: Signer> Installer<S> {
                 &initrd_location,
             )
             .context("Failed to assemble xen image.")?;
-            let stub_target = self
-                .esp_paths
-                .linux
-                .join(stub_name(generation, &self.key_pair.public_key)?);
+
+            let stub_name = stub_name(generation, &self.key_pair.public_key)?;
+            let stub_target = self.esp_paths.linux.join(&stub_name);
             self.gc_roots.extend([&stub_target]);
             install_signed(&self.key_pair, &xen_image, &stub_target)
                 .context("Failed to install the Lanzaboote image.")?;
 
-            // TODO: Currently xen doesn't work with specializations,
-            // and specialization name is not handled here, but this may
-            // be changed in the future.
+            // Entry name works as a sort key (?), reusing stub_name to make
+            // it compatible with UKI entries.
             let entry_path = self
                 .esp_paths
                 .entries
-                .join(format!("nixos-xen-{generation}.conf"));
+                .join(format!("{}.conf", stub_name.display()));
             self.gc_roots.extend([&entry_path]);
 
             let mut entry = String::new();
-            writeln!(
-                entry,
-                "title {}",
-                os_release.0.get("PRETTY_NAME").expect("exists")
-            )?;
+            writeln!(entry, "title {}", os_release.pretty_name())?;
+            writeln!(entry, "version {}", os_release.version_id())?;
             // stub_target should be utf-8, .display() is ok here.
             // TODO: but better cleanup this. Use esp_relative_uefi_path
             // for this calculation.
@@ -316,6 +311,11 @@ impl<S: Signer> Installer<S> {
                 entry,
                 "efi {}",
                 stub_target.strip_prefix(&self.esp_paths.esp)?.display()
+            )?;
+            writeln!(
+                entry,
+                "sort-key {}",
+                generation.spec.lanzaboote_extension.sort_key,
             )?;
 
             let entry_tmp = tempdir.write_secure_file(entry)?;
