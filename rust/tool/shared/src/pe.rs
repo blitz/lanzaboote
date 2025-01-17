@@ -152,7 +152,7 @@ pub fn xen_image(
     writeln!(xen_config, "options={}", xen_options.join(" "),)?;
     let xen_config_file = tempdir.write_secure_file(xen_config)?;
 
-    ensure!(kernel.ends_with("vmlinux"), "kernel is not vmlinux image");
+    ensure!(kernel.ends_with("bzImage"), "kernel is not a bzImgae");
 
     let mut sections = vec![
         s(".config", xen_config_file),
