@@ -102,7 +102,10 @@ impl Generation {
             spec: ExtendedBootJson {
                 bootspec: bootspec.clone(),
                 lanzaboote_extension: self.spec.lanzaboote_extension.clone(),
-                xen_extension: self.spec.xen_extension.clone(),
+                // TODO: It is only possible to use xen with toplevel system derivation, as there is no
+                // extension fields for bootspec generation anymore:
+                // https://github.com/DeterminateSystems/bootspec/issues/147
+                xen_extension: None,
             },
             ..self.clone()
         }
