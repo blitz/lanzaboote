@@ -287,7 +287,7 @@ impl<S: Signer> Installer<S> {
             )
             .context("Failed to assemble xen image")?;
 
-            let stub_name = stub_name(generation, &self.signer, "xen")?;
+            let stub_name = stub_name(generation, &self.signer, "nixos-xen")?;
             let stub_target = self.esp_paths.linux.join(&stub_name);
             self.gc_roots.extend([&stub_target]);
             install_signed(&self.signer, &xen_image, &stub_target)
@@ -356,6 +356,20 @@ impl<S: Signer> Installer<S> {
         }
         self.gc_roots
             .extend([&stub_target, &kernel_path, &initrd_path]);
+
+        if generation.spec.xen_extension.is_some() {
+            let stub_name = stub_name(generation, &self.signer, "nixos-xen")
+                .context("While getting stub name")?;
+            let stub_target = self.esp_paths.linux.join(&stub_name);
+            let entry_path = self
+                .esp_paths
+                .linux
+                .join(format!("{}.conf", stub_name.display()));
+            if !stub_target.exists() || !entry_path.exists() {
+                anyhow::bail!("Missing xen efi or entry.")
+            }
+            self.gc_roots.extend([&stub_target, &entry_path]);
+        }
 
         Ok(())
     }
