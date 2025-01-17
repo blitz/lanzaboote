@@ -18,6 +18,7 @@ use time::Date;
 pub struct ExtendedBootJson {
     pub bootspec: BootSpec,
     pub lanzaboote_extension: LanzabooteExtension,
+    pub xen_extension: Option<XenExtension>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -31,6 +32,16 @@ impl Default for LanzabooteExtension {
             sort_key: String::from("lanzaboote"),
         }
     }
+}
+
+// TODO: Should it be moved to bootspec crate itself?
+// Probably after its standardization, bootspec crate is only used in lanzaboote for now, bootspec support is
+// ad-hoc in nixpkgs right now.
+#[derive(Debug, Clone, Deserialize)]
+pub struct XenExtension {
+    pub xen: String,
+    #[serde(rename = "xenParams")]
+    pub xen_params: Vec<String>,
 }
 
 /// A system configuration.
@@ -68,6 +79,10 @@ impl Generation {
             .get("org.nix-community.lanzaboote")
             .and_then(|v| serde_json::from_value::<LanzabooteExtension>(v.clone()).ok())
             .unwrap_or_default();
+        let xen_extension = boot_json
+            .extensions
+            .get("org.xenproject.bootspec.v1")
+            .and_then(|v| serde_json::from_value::<XenExtension>(v.clone()).ok());
 
         Ok(Self {
             version: link.version,
@@ -76,6 +91,7 @@ impl Generation {
             spec: ExtendedBootJson {
                 bootspec,
                 lanzaboote_extension,
+                xen_extension,
             },
         })
     }
@@ -86,6 +102,7 @@ impl Generation {
             spec: ExtendedBootJson {
                 bootspec: bootspec.clone(),
                 lanzaboote_extension: self.spec.lanzaboote_extension.clone(),
+                xen_extension: self.spec.xen_extension.clone(),
             },
             ..self.clone()
         }
