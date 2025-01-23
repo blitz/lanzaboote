@@ -98,16 +98,22 @@ impl<S: Signer> Installer<S> {
 
         if self.broken_gens.is_empty() {
             log::info!("Collecting garbage...");
-            // Only collect garbage in these two directories. This way, no files that do not belong to
+            // Only collect garbage in these directories. This way, no files that do not belong to
             // the NixOS installation are deleted. Lanzatool takes full control over the esp/EFI/nixos
             // directory and deletes ALL files that it doesn't know about. Dual- or multiboot setups
             // that need files in this directory will NOT work.
             self.gc_roots.collect_garbage(&self.esp_paths.nixos)?;
-            // The esp/EFI/Linux directory is assumed to be potentially shared with other distros.
+            // The esp/EFI/Linux and loader/entries directories are assumed to be potentially shared with other distros.
             // Thus, only files that start with "nixos-" are garbage collected (i.e. potentially
             // deleted).
             self.gc_roots
                 .collect_garbage_with_filter(&self.esp_paths.linux, |p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .map_or(false, |n| n.starts_with("nixos-"))
+                })?;
+            self.gc_roots
+                .collect_garbage_with_filter(&self.esp_paths.entries, |p| {
                     p.file_name()
                         .and_then(|n| n.to_str())
                         .map_or(false, |n| n.starts_with("nixos-"))
@@ -264,10 +270,64 @@ impl<S: Signer> Installer<S> {
         let stub_target = self
             .esp_paths
             .linux
-            .join(stub_name(generation, &self.signer).context("Get stub name")?);
+            .join(stub_name(generation, &self.signer, "nixos").context("Get stub name")?);
         self.gc_roots.extend([&stub_target]);
         install_signed(&self.signer, &lanzaboote_image_path, &stub_target)
             .context("Failed to install the Lanzaboote stub.")?;
+
+        if let Some(xen) = &generation.spec.xen_extension {
+            use std::fmt::Write;
+            let xen_image = pe::xen_image(
+                &tempdir,
+                &PathBuf::from(&xen.xen),
+                &xen.xen_params,
+                &kernel_cmdline,
+                &bootspec.kernel,
+                &initrd_location,
+            )
+            .context("Failed to assemble xen image")?;
+
+            let stub_name = stub_name(generation, &self.signer, "nixos-xen")?;
+            let stub_target = self.esp_paths.linux.join(&stub_name);
+            self.gc_roots.extend([&stub_target]);
+            install_signed(&self.signer, &xen_image, &stub_target)
+                .context("Failed to install the Lanzaboote image.")?;
+
+            // Entry name works as a sort key (?), reusing stub_name to make
+            // it compatible with UKI entries.
+            let entry_path = self
+                .esp_paths
+                .entries
+                .join(format!("{}.conf", stub_name.display()));
+            self.gc_roots.extend([&entry_path]);
+
+            let mut entry = String::new();
+            writeln!(
+                entry,
+                "title {} (with Xen Hypervisor)",
+                os_release.pretty_name()
+            )?;
+            writeln!(entry, "version {}", os_release.version_id())?;
+            // stub_target should be utf-8, .display() is ok here.
+            // TODO: but better cleanup this. Use esp_relative_uefi_path
+            // for this calculation.
+            writeln!(
+                entry,
+                "efi {}",
+                stub_target.strip_prefix(&self.esp_paths.esp)?.display()
+            )?;
+            writeln!(
+                entry,
+                "sort-key {}",
+                generation.spec.lanzaboote_extension.sort_key,
+            )?;
+
+            let entry_tmp = tempdir.write_secure_file(entry)?;
+
+            // Entry name is unique (with regards to comment about
+            // specialisations above).
+            install(&entry_tmp, &entry_path)?;
+        }
 
         Ok(())
     }
@@ -279,7 +339,7 @@ impl<S: Signer> Installer<S> {
         let stub_target = self
             .esp_paths
             .linux
-            .join(stub_name(generation, &self.signer).context("While getting stub name")?);
+            .join(stub_name(generation, &self.signer, "nixos").context("While getting stub name")?);
         let stub = fs::read(&stub_target)
             .with_context(|| format!("Failed to read the stub: {}", stub_target.display()))?;
         let kernel_path = resolve_efi_path(
@@ -296,6 +356,20 @@ impl<S: Signer> Installer<S> {
         }
         self.gc_roots
             .extend([&stub_target, &kernel_path, &initrd_path]);
+
+        if generation.spec.xen_extension.is_some() {
+            let stub_name = stub_name(generation, &self.signer, "nixos-xen")
+                .context("While getting stub name")?;
+            let stub_target = self.esp_paths.linux.join(&stub_name);
+            let entry_path = self
+                .esp_paths
+                .linux
+                .join(format!("{}.conf", stub_name.display()));
+            if !stub_target.exists() || !entry_path.exists() {
+                anyhow::bail!("Missing xen efi or entry.")
+            }
+            self.gc_roots.extend([&stub_target, &entry_path]);
+        }
 
         Ok(())
     }
@@ -374,7 +448,7 @@ fn resolve_efi_path(esp: &Path, efi_path: &[u8]) -> Result<PathBuf> {
 /// Compute the file name to be used for the stub of a certain generation, signed with the given key.
 ///
 /// The generated name is input-addressed by the toplevel corresponding to the generation and the public part of the signing key.
-fn stub_name<S: Signer>(generation: &Generation, signer: &S) -> Result<PathBuf> {
+fn stub_name<S: Signer>(generation: &Generation, signer: &S, prefix: &str) -> Result<PathBuf> {
     let bootspec = &generation.spec.bootspec.bootspec;
     let public_key = signer.get_public_key()?;
     let stub_inputs = [
@@ -390,12 +464,12 @@ fn stub_name<S: Signer>(generation: &Generation, signer: &S) -> Result<PathBuf> 
     ));
     if let Some(specialisation_name) = &generation.specialisation_name {
         Ok(PathBuf::from(format!(
-            "nixos-generation-{}-specialisation-{}-{}.efi",
+            "{prefix}-generation-{}-specialisation-{}-{}.efi",
             generation, specialisation_name, stub_input_hash
         )))
     } else {
         Ok(PathBuf::from(format!(
-            "nixos-generation-{}-{}.efi",
+            "{prefix}-generation-{}-{}.efi",
             generation, stub_input_hash
         )))
     }
