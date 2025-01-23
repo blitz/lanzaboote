@@ -4,7 +4,7 @@ let
   cfg = config.boot.lanzaboote;
 
   sbctlWithPki = pkgs.sbctl.override {
-    databasePath = "/tmp/pki";
+    databasePath = "/run/sbctl-pki";
   };
 
   loaderSettingsFormat = pkgs.formats.keyValue {
@@ -124,8 +124,8 @@ in
       enable = true;
       installHook = pkgs.writeShellScript "bootinstall" ''
         ${optionalString cfg.enrollKeys ''
-          mkdir -p /tmp/pki
-          cp -r ${cfg.pkiBundle}/* /tmp/pki
+          mkdir -p /run/sbctl-pki
+          cp -r ${cfg.pkiBundle}/* /run/sbctl-pki
           ${lib.getExe sbctlWithPki} enroll-keys --yes-this-might-brick-my-machine
         ''}
 
