@@ -124,8 +124,8 @@ in
       enable = true;
       installHook = pkgs.writeShellScript "bootinstall" ''
         ${optionalString cfg.enrollKeys ''
-          mkdir -p /tmp/pki
-          cp -r ${cfg.pkiBundle}/* /tmp/pki
+          ${lib.getExe' pkgs.coreutils "mkdir"} -p /tmp/pki
+          ${lib.getExe' pkgs.coreutils "cp"} -r ${cfg.pkiBundle}/* /tmp/pki
           ${lib.getExe sbctlWithPki} enroll-keys --yes-this-might-brick-my-machine
         ''}
 
